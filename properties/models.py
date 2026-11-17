@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
@@ -10,6 +11,14 @@ class TimeStampedModel(models.Model):
 
 	class Meta:
 		abstract = True
+
+
+def _default_expenditure_rate():
+	return Decimal(str(getattr(settings, "DEFAULT_EXPENDITURE_RATE_PERCENT", "40.00")))
+
+
+def _default_rental_tax_rate():
+	return Decimal(str(getattr(settings, "DEFAULT_RENTAL_TAX_RATE_PERCENT", "10.00")))
 
 
 class Property(TimeStampedModel):
@@ -39,6 +48,39 @@ class Property(TimeStampedModel):
 
 	def __str__(self):
 		return self.name
+
+
+class PropertyAgent(TimeStampedModel):
+	"""Caretaker/agent assigned to help manage a property on the owner's behalf."""
+
+	id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+	property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name="agents")
+	agent = models.ForeignKey(
+		settings.AUTH_USER_MODEL,
+		on_delete=models.CASCADE,
+		related_name="agent_assignments",
+	)
+	assigned_by = models.ForeignKey(
+		settings.AUTH_USER_MODEL,
+		on_delete=models.SET_NULL,
+		null=True,
+		blank=True,
+		related_name="agent_assignments_made",
+	)
+	can_manage_payments = models.BooleanField(default=True)
+	can_manage_maintenance = models.BooleanField(default=True)
+	can_manage_tenants = models.BooleanField(default=False)
+	can_send_communications = models.BooleanField(default=True)
+	is_active = models.BooleanField(default=True)
+
+	class Meta:
+		ordering = ["-created_at"]
+		constraints = [
+			models.UniqueConstraint(fields=["property", "agent"], name="uniq_agent_per_property"),
+		]
+
+	def __str__(self):
+		return f"{self.agent.email} -> {self.property.name}"
 
 
 class Unit(TimeStampedModel):
@@ -96,6 +138,16 @@ class PaymentConfig(TimeStampedModel):
 	garbage_bill = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 	security_levy = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 	custom_charges = models.JSONField(default=list, blank=True)
+	# Kenyan rental-income reporting: configurable per property, never hardcoded in views.
+	# Defaults come from DEFAULT_EXPENDITURE_RATE_PERCENT / DEFAULT_RENTAL_TAX_RATE_PERCENT env vars.
+	expenditure_rate_percent = models.DecimalField(
+		max_digits=5, decimal_places=2, default=_default_expenditure_rate,
+		help_text="Assumed monthly expenditure as a percentage of collections, used in the revenue report.",
+	)
+	rental_tax_rate_percent = models.DecimalField(
+		max_digits=5, decimal_places=2, default=_default_rental_tax_rate,
+		help_text="Rental income tax rate applied to monthly revenue (collections minus expenditure).",
+	)
 
 	def __str__(self):
 		return f"Payment config - {self.property.name}"

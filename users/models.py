@@ -33,6 +33,7 @@ class User(AbstractUser):
 	class Role(models.TextChoices):
 		OWNER = "owner", "Owner"
 		TENANT = "tenant", "Tenant"
+		AGENT = "agent", "Caretaker / Agent"
 		ADMIN = "admin", "Admin"
 
 	id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -42,6 +43,13 @@ class User(AbstractUser):
 	phone = models.CharField(max_length=20, blank=True)
 	role = models.CharField(max_length=20, choices=Role.choices, default=Role.TENANT)
 	is_email_verified = models.BooleanField(default=False)
+	is_phone_verified = models.BooleanField(default=False)
+	# Kenyan Revenue Authority PIN — used on production rent receipts/statements for owners
+	# who choose to provide it. Optional, never a hardcoded value.
+	kra_pin = models.CharField(max_length=20, blank=True)
+	national_id = models.CharField(max_length=20, blank=True)
+	notify_by_sms = models.BooleanField(default=True)
+	notify_by_email = models.BooleanField(default=True)
 	created_at = models.DateTimeField(auto_now_add=True)
 	updated_at = models.DateTimeField(auto_now=True)
 
@@ -49,6 +57,21 @@ class User(AbstractUser):
 	REQUIRED_FIELDS = []
 
 	objects = UserManager()
+
+	def save(self, *args, **kwargs):
+		# Emails are looked up (and de-duplicated against) in several different
+		# places -- registration, agent invites, tenant invites -- and those call
+		# sites don't all normalize case the same way before querying. Forcing a
+		# single canonical (lower-cased) form here, at the model level, is what
+		# actually guarantees "one email = one account" instead of relying on
+		# every call site getting its own lookup right. Without this, inviting
+		# "OwnerA@test.com" as an agent while the account registered as
+		# "owneragent@test.com" (or any differently-cased variant) silently
+		# creates a second, duplicate account instead of matching the existing
+		# one -- bypassing role-reuse guards that assume a case-sensitive match.
+		if self.email:
+			self.email = self.email.strip().lower()
+		super().save(*args, **kwargs)
 
 	def __str__(self):
 		return self.email

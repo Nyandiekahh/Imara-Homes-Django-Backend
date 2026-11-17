@@ -8,7 +8,7 @@ from .models import OTPCode, User
 class UserAdmin(BaseUserAdmin):
 	model = User
 	ordering = ("-created_at",)
-	list_display = ("email", "full_name", "role", "is_active", "is_staff", "created_at")
+	list_display = ("email", "full_name", "role", "phone", "is_active", "is_staff", "created_at")
 	list_filter = ("role", "is_active", "is_staff", "is_superuser")
 	search_fields = ("email", "full_name", "phone")
 	readonly_fields = ("created_at", "updated_at", "last_login")
@@ -17,7 +17,11 @@ class UserAdmin(BaseUserAdmin):
 		(None, {"fields": ("email", "password")}),
 		(
 			"Personal info",
-			{"fields": ("full_name", "phone", "role", "is_email_verified")},
+			{"fields": ("full_name", "phone", "role", "is_email_verified", "is_phone_verified", "kra_pin", "national_id")},
+		),
+		(
+			"Notification preferences",
+			{"fields": ("notify_by_email", "notify_by_sms")},
 		),
 		(
 			"Permissions",

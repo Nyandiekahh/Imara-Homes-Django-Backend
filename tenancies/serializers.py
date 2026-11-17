@@ -4,6 +4,7 @@ from rest_framework import serializers
 from communications.models import Notice
 from leases.models import Lease
 from maintenance.models import MaintenanceRequest
+from maintenance.serializers import MaintenanceAttachmentSerializer
 from payments.models import Payment
 
 from .models import Tenancy, TenantRating
@@ -85,6 +86,9 @@ class TenantRatingSerializer(serializers.ModelSerializer):
 
 
 class MaintenanceRequestSerializer(serializers.ModelSerializer):
+    assigned_to_name = serializers.CharField(source="assigned_to.full_name", read_only=True)
+    attachments = MaintenanceAttachmentSerializer(many=True, read_only=True)
+
     class Meta:
         model = MaintenanceRequest
         fields = [
@@ -93,6 +97,9 @@ class MaintenanceRequestSerializer(serializers.ModelSerializer):
             "description",
             "priority",
             "status",
+            "assigned_to_name",
+            "notes",
+            "attachments",
             "created_at",
             "updated_at",
         ]

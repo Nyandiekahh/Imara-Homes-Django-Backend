@@ -4,7 +4,9 @@ from .views import (
     EmailLogsView,
     EmailTemplateDetailView,
     EmailTemplatesView,
+    SMSLogsView,
     resend_email,
+    resend_sms,
     send_announcement,
     send_bulk_reminder,
     send_invitation,
@@ -20,4 +22,6 @@ urlpatterns = [
     path("emails/logs/<uuid:email_id>/resend/", resend_email),
     path("emails/templates/", EmailTemplatesView.as_view()),
     path("emails/templates/<uuid:template_id>/", EmailTemplateDetailView.as_view()),
+    path("sms/logs/", SMSLogsView.as_view()),
+    path("sms/logs/<uuid:sms_id>/resend/", resend_sms),
 ]

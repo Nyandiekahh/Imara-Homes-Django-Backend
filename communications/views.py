@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.decorators import api_view, permission_classes
@@ -5,17 +6,26 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from payments.models import Payment
+from properties.scoping import accessible_property_ids
 from tenancies.models import Tenancy
 
-from .models import Announcement, EmailLog, EmailTemplate, Notice
-from .serializers import AnnouncementSerializer, EmailLogSerializer, EmailTemplateSerializer
+from .email_service import send_email
+from .models import Announcement, EmailLog, EmailTemplate, Notice, SMSLog
+from .notify import notify_user
+from .serializers import (
+	AnnouncementSerializer,
+	EmailLogSerializer,
+	EmailTemplateSerializer,
+	SMSLogSerializer,
+)
+from .sms_service import send_sms
 
 
 def _ensure_default_templates():
 	defaults = [
 		{
 			"name": "invitation",
-			"subject_template": "You are invited to join NestFlow",
+			"subject_template": f"You are invited to join {settings.APP_NAME}",
 			"body_template": "You have been invited to your property portal. Use your OTP to continue.",
 		},
 		{
@@ -35,8 +45,8 @@ def _ensure_default_templates():
 
 def _tenants_for_scope(user, property_id=None, overdue_only=False):
 	tenancies = Tenancy.objects.select_related("user", "property").filter(status=Tenancy.Status.ACTIVE)
-	if user.role == "owner":
-		tenancies = tenancies.filter(property__owner=user)
+	if user.role in ("owner", "agent", "admin"):
+		tenancies = tenancies.filter(property_id__in=accessible_property_ids(user))
 	if property_id:
 		tenancies = tenancies.filter(property_id=property_id)
 	if overdue_only:
@@ -66,13 +76,11 @@ def send_announcement(request):
 			subject=announcement.subject,
 			message=announcement.message,
 		)
-		EmailLog.objects.create(
-			announcement=announcement,
-			recipient_email=tenancy.user.email,
+		notify_user(
+			tenancy.user,
 			subject=announcement.subject,
-			body=announcement.message,
-			status=EmailLog.Status.SENT,
-			sent_at=timezone.now(),
+			message=announcement.message,
+			announcement=announcement,
 		)
 
 	announcement.recipients = recipients
@@ -86,16 +94,13 @@ def send_announcement(request):
 def send_bulk_reminder(request):
 	_ensure_default_templates()
 	template = EmailTemplate.objects.filter(name="payment_reminder", is_active=True).first()
+	subject = template.subject_template if template else "Rent Payment Reminder"
+	body = template.body_template if template else "Please complete your rent payment."
 	tenancies = _tenants_for_scope(request.user, property_id=request.data.get("property_id"))
 	sent_count = 0
 	for tenancy in tenancies:
-		EmailLog.objects.create(
-			recipient_email=tenancy.user.email,
-			subject=template.subject_template if template else "Rent Payment Reminder",
-			body=template.body_template if template else "Please complete your rent payment.",
-			status=EmailLog.Status.SENT,
-			sent_at=timezone.now(),
-		)
+		message = f"Hi {tenancy.user.full_name or ''}, {body}".strip()
+		notify_user(tenancy.user, subject=subject, message=message)
 		sent_count += 1
 	return Response({"sent_count": sent_count})
 
@@ -105,6 +110,8 @@ def send_bulk_reminder(request):
 def send_overdue_reminder(request):
 	_ensure_default_templates()
 	template = EmailTemplate.objects.filter(name="overdue_notice", is_active=True).first()
+	subject = template.subject_template if template else "Overdue Rent Notice"
+	body = template.body_template if template else "Your payment is overdue."
 	tenancies = _tenants_for_scope(
 		request.user,
 		property_id=request.data.get("property_id"),
@@ -112,13 +119,8 @@ def send_overdue_reminder(request):
 	)
 	sent_count = 0
 	for tenancy in tenancies:
-		EmailLog.objects.create(
-			recipient_email=tenancy.user.email,
-			subject=template.subject_template if template else "Overdue Rent Notice",
-			body=template.body_template if template else "Your payment is overdue.",
-			status=EmailLog.Status.SENT,
-			sent_at=timezone.now(),
-		)
+		message = f"Hi {tenancy.user.full_name or ''}, {body}".strip()
+		notify_user(tenancy.user, subject=subject, message=message)
 		sent_count += 1
 	return Response({"sent_count": sent_count})
 
@@ -129,14 +131,9 @@ def send_invitation(request):
 	email = request.data.get("email")
 	if not email:
 		return Response({"detail": "email is required."}, status=status.HTTP_400_BAD_REQUEST)
-	EmailLog.objects.create(
-		recipient_email=email,
-		subject="NestFlow Invitation",
-		body=request.data.get("message", "You have been invited to join NestFlow."),
-		status=EmailLog.Status.SENT,
-		sent_at=timezone.now(),
-	)
-	return Response({"status": "sent"}, status=status.HTTP_201_CREATED)
+	message = request.data.get("message", f"You have been invited to join {settings.APP_NAME}.")
+	log = send_email(email, f"{settings.APP_NAME} Invitation", message)
+	return Response(EmailLogSerializer(log).data, status=status.HTTP_201_CREATED)
 
 
 class EmailLogsView(APIView):
@@ -156,15 +153,29 @@ def resend_email(request, email_id):
 	log = EmailLog.objects.filter(id=email_id).first()
 	if not log:
 		return Response({"detail": "Email log not found."}, status=status.HTTP_404_NOT_FOUND)
-	resent = EmailLog.objects.create(
-		announcement=log.announcement,
-		recipient_email=log.recipient_email,
-		subject=log.subject,
-		body=log.body,
-		status=EmailLog.Status.SENT,
-		sent_at=timezone.now(),
-	)
+	resent = send_email(log.recipient_email, log.subject, log.body, announcement=log.announcement)
 	return Response(EmailLogSerializer(resent).data)
+
+
+class SMSLogsView(APIView):
+	permission_classes = [permissions.IsAuthenticated]
+
+	def get(self, request):
+		logs = SMSLog.objects.all()
+		status_filter = request.query_params.get("status")
+		if status_filter:
+			logs = logs.filter(status=status_filter)
+		return Response(SMSLogSerializer(logs, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([permissions.IsAuthenticated])
+def resend_sms(request, sms_id):
+	log = SMSLog.objects.filter(id=sms_id).first()
+	if not log:
+		return Response({"detail": "SMS log not found."}, status=status.HTTP_404_NOT_FOUND)
+	resent = send_sms(log.recipient_phone, log.message, announcement=log.announcement)
+	return Response(SMSLogSerializer(resent).data)
 
 
 class EmailTemplatesView(APIView):

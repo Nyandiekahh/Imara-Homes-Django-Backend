@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
 from django.utils.encoding import force_str
@@ -9,6 +10,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from .models import OTPCode, User
+from communications.notify import notify_user
 
 
 def _user_payload(user):
@@ -19,6 +21,10 @@ def _user_payload(user):
 		"phone": user.phone,
 		"role": user.role,
 		"is_active": user.is_active,
+		"kra_pin": user.kra_pin,
+		"national_id": user.national_id,
+		"notify_by_sms": user.notify_by_sms,
+		"notify_by_email": user.notify_by_email,
 	}
 
 
@@ -36,7 +42,7 @@ class RegisterView(APIView):
 
 	def post(self, request):
 		data = request.data
-		required_fields = ["email", "full_name", "password", "role"]
+		required_fields = ["email", "full_name", "password"]
 		missing = [field for field in required_fields if not data.get(field)]
 		if missing:
 			return Response(
@@ -50,21 +56,35 @@ class RegisterView(APIView):
 				status=status.HTTP_400_BAD_REQUEST,
 			)
 
+		# Public self-registration only ever creates Owner accounts. Any "role"
+		# field in the request body is ignored — tenant and agent accounts are
+		# created exclusively through the invite flows (TenantsInviteView /
+		# PropertyAgentListCreateView), which vet who can create them and tie
+		# the new account to a specific property; admin accounts are created
+		# only via Django's createsuperuser/admin panel. Accepting an
+		# attacker-supplied role here would let anyone self-register as an
+		# agent or admin and bypass RBAC entirely.
 		user = User.objects.create_user(
 			email=data["email"],
 			password=data["password"],
 			full_name=data.get("full_name", ""),
 			phone=data.get("phone", ""),
-			role=data.get("role", User.Role.TENANT),
+			role=User.Role.OWNER,
 			is_active=True,
 		)
 		otp = OTPCode.create_for_user(user, OTPCode.Purpose.REGISTRATION)
+		notify_user(
+			user,
+			subject=f"Verify your {settings.APP_NAME} account",
+			message=f"Your {settings.APP_NAME} verification code is {otp.code}. It expires in 10 minutes.",
+			force=True,
+		)
 
 		payload = {
 			"message": "Registration successful. Verify your OTP to continue.",
 			"user": _user_payload(user),
 		}
-		if request.user.is_staff if request.user.is_authenticated else True:
+		if settings.DEBUG:
 			payload["otp_debug"] = otp.code
 		return Response(payload, status=status.HTTP_201_CREATED)
 
@@ -73,7 +93,12 @@ class LoginView(APIView):
 	permission_classes = [permissions.AllowAny]
 
 	def post(self, request):
-		email = request.data.get("email", "")
+		# Emails are stored lower-cased (see User.save()), but Django's default
+		# ModelBackend.authenticate() looks the username field up with an exact
+		# match, not a case-insensitive one -- so without normalizing here, a user
+		# who types their email with any different capitalization than however
+		# it happened to be stored would wrongly get "invalid email or password".
+		email = (request.data.get("email") or "").strip().lower()
 		password = request.data.get("password", "")
 		user = authenticate(request, email=email, password=password)
 		if not user:
@@ -125,8 +150,14 @@ class ResendOTPView(APIView):
 			return Response({"message": "If account exists, OTP was resent."})
 
 		otp = OTPCode.create_for_user(user, OTPCode.Purpose.REGISTRATION)
+		notify_user(
+			user,
+			subject=f"Your {settings.APP_NAME} verification code",
+			message=f"Your {settings.APP_NAME} verification code is {otp.code}. It expires in 10 minutes.",
+			force=True,
+		)
 		payload = {"message": "OTP resent successfully."}
-		if request.user.is_staff if request.user.is_authenticated else True:
+		if settings.DEBUG:
 			payload["otp_debug"] = otp.code
 		return Response(payload)
 
@@ -181,8 +212,18 @@ class ForgotPasswordView(APIView):
 			return Response({"message": "If account exists, reset details were sent."})
 
 		otp = OTPCode.create_for_user(user, OTPCode.Purpose.PASSWORD_RESET)
+		reset_link = f"{settings.FRONTEND_BASE_URL}/reset-password?email={user.email}&otp={otp.code}"
+		notify_user(
+			user,
+			subject=f"Reset your {settings.APP_NAME} password",
+			message=(
+				f"Your {settings.APP_NAME} password reset code is {otp.code}. It expires in 10 minutes. "
+				f"Reset here: {reset_link}"
+			),
+			force=True,
+		)
 		payload = {"message": "Reset details sent."}
-		if request.user.is_staff if request.user.is_authenticated else True:
+		if settings.DEBUG:
 			payload["otp_debug"] = otp.code
 			payload["uid"] = str(user.id)
 			payload["token"] = otp.code
@@ -259,11 +300,19 @@ class ProfileView(APIView):
 
 	def patch(self, request):
 		user = request.user
-		updatable = ["full_name", "phone", "email"]
-		for field in updatable:
+		text_fields = ["full_name", "phone", "email", "kra_pin", "national_id"]
+		bool_fields = ["notify_by_sms", "notify_by_email"]
+		changed = []
+		for field in text_fields:
 			if field in request.data:
 				setattr(user, field, request.data.get(field) or "")
-		user.save(update_fields=[*updatable, "updated_at"])
+				changed.append(field)
+		for field in bool_fields:
+			if field in request.data:
+				setattr(user, field, bool(request.data.get(field)))
+				changed.append(field)
+		if changed:
+			user.save(update_fields=[*changed, "updated_at"])
 		return Response(_user_payload(user))
 
 

@@ -120,3 +120,31 @@ class EmailTemplate(TimeStampedModel):
 
 	def __str__(self):
 		return self.name
+
+
+class SMSLog(TimeStampedModel):
+	class Status(models.TextChoices):
+		SENT = "sent", "Sent"
+		FAILED = "failed", "Failed"
+
+	id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+	announcement = models.ForeignKey(
+		Announcement,
+		on_delete=models.SET_NULL,
+		null=True,
+		blank=True,
+		related_name="sms_logs",
+	)
+	recipient_phone = models.CharField(max_length=20)
+	message = models.TextField()
+	status = models.CharField(max_length=20, choices=Status.choices, default=Status.SENT)
+	provider_message_id = models.CharField(max_length=120, blank=True)
+	provider_status = models.CharField(max_length=60, blank=True)
+	error_message = models.TextField(blank=True)
+	sent_at = models.DateTimeField(null=True, blank=True)
+
+	class Meta:
+		ordering = ["-created_at"]
+
+	def __str__(self):
+		return f"{self.recipient_phone} - {self.status}"

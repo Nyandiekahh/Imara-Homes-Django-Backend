@@ -1,16 +1,18 @@
-# NestFlow Django Backend
+# ImaraHomes Django Backend
 
 This backend mirrors the React frontend contract in this repository and is structured into independent Django apps for clean maintenance.
 
 ## Apps
 
-- `users`: Custom user model, roles, OTP flows, auth/profile endpoints
-- `properties`: Properties, units, payment config, property documents, occupancy/stats
-- `tenancies`: Tenant invitations, tenancy lifecycle, tenant self-service endpoints
+- `users`: Custom user model, roles (owner/agent/tenant/admin), OTP flows, KRA PIN / National ID, notification preferences, auth/profile endpoints
+- `properties`: Properties, units, payment config (fines, charges, rental-tax rates), property documents, occupancy/stats, caretaker/agent assignment (`PropertyAgent`, scoped permissions)
+- `tenancies`: Tenant invitations, tenancy lifecycle, tenant self-service endpoints (maintenance, payments, lease)
 - `leases`: Lease CRUD, signing, renewals, termination, lease documents
-- `payments`: Payment ledger, M-Pesa STK simulation endpoints, receipts, statements, summaries
-- `maintenance`: Maintenance request model (used by tenancy endpoints)
-- `communications`: Announcements, notices, email logs, templates, reminders
+- `payments`: Payment ledger, real M-Pesa Daraja STK Push + callback + status polling, PDF e-receipts, Kenyan rental-income revenue/tax report, statements, summaries
+- `maintenance`: Owner/agent-facing maintenance request management, photo attachments (tenant-facing create/list lives under `tenancies`)
+- `communications`: Announcements, notices, real email (SMTP) + SMS (Africa's Talking) sending and logs, templates, reminders
+
+All property-scoped endpoints (properties, tenancies, leases, payments, maintenance) share one access-control helper, `properties/scoping.py`, so an owner sees everything they own and an agent sees only what they've been explicitly granted.
 
 ## Quick Start
 
@@ -45,7 +47,10 @@ Set that in the project root `.env` (or `.env.example` copy), then run frontend 
 
 ## Important Notes
 
-- M-Pesa endpoints are implemented in development-safe simulated mode for smooth frontend polling and status transitions.
+- M-Pesa STK Push uses the real Safaricom Daraja API when `MPESA_CONSUMER_KEY` / `MPESA_CONSUMER_SECRET` / `MPESA_SHORTCODE` / `MPESA_PASSKEY` are set; with no credentials configured it falls back to a development-safe simulated flow so the frontend can still be exercised end-to-end without Daraja access.
+- SMS notifications use Africa's Talking when `AFRICASTALKING_API_KEY` / `AFRICASTALKING_USERNAME` are set; otherwise SMS sends are logged (not sent) so nothing breaks in dev. Same pattern for email: real SMTP when `EMAIL_HOST` is set, console backend otherwise.
+- Every rate that affects money (rental tax %, expenditure %, fines, due day) is a per-property `PaymentConfig` field with a settings-driven default (`DEFAULT_EXPENDITURE_RATE_PERCENT`, `DEFAULT_RENTAL_TAX_RATE_PERCENT`) — nothing is hardcoded.
+- OTP codes are only ever echoed back in API responses when `DJANGO_DEBUG=True`; in production they're delivered exclusively via email/SMS.
 - All major domain models are registered in Django admin for full visibility and editing.
 - Endpoint paths follow the frontend service files (`src/services/*.js`).
 
@@ -72,6 +77,16 @@ This backend now includes production-safe defaults and Render config via `render
 	- `DJANGO_CORS_ALLOWED_ORIGINS=<your-frontend-origin>`
 	- `DJANGO_CSRF_TRUSTED_ORIGINS=https://<your-frontend-domain>`
 4. Deploy. Build runs install, static collection, and migrations.
+
+### Optional integrations (all safe to leave unset in dev)
+
+- **M-Pesa Daraja**: `MPESA_ENV` (sandbox/production), `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_SHORTCODE`, `MPESA_PASSKEY`, `MPESA_CALLBACK_BASE_URL`
+- **Africa's Talking SMS**: `AFRICASTALKING_USERNAME`, `AFRICASTALKING_API_KEY`, `AFRICASTALKING_SENDER_ID`
+- **Email (SMTP)**: `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS`, `DEFAULT_FROM_EMAIL`
+- **Frontend URL** (used in email links): `FRONTEND_BASE_URL`
+- **Kenyan tax defaults**: `DEFAULT_EXPENDITURE_RATE_PERCENT` (default 40), `DEFAULT_RENTAL_TAX_RATE_PERCENT` (default 10)
+
+See `.env.example` for the full list with inline explanations.
 
 ### Local development
 

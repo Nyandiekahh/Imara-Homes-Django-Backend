@@ -1,4 +1,4 @@
-"""Main URL configuration for NestFlow backend."""
+"""Main URL configuration for the ImaraHomes backend."""
 
 from django.contrib import admin
 from django.conf import settings

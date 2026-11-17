@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Announcement, EmailLog, EmailTemplate, Notice
+from .models import Announcement, EmailLog, EmailTemplate, Notice, SMSLog
 
 
 @admin.register(Announcement)
@@ -24,10 +24,15 @@ class EmailLogAdmin(admin.ModelAdmin):
 	search_fields = ("recipient_email", "subject", "error_message")
 
 
+@admin.register(SMSLog)
+class SMSLogAdmin(admin.ModelAdmin):
+	list_display = ("recipient_phone", "status", "provider_status", "sent_at", "created_at")
+	list_filter = ("status",)
+	search_fields = ("recipient_phone", "message", "error_message")
+
+
 @admin.register(EmailTemplate)
 class EmailTemplateAdmin(admin.ModelAdmin):
 	list_display = ("name", "is_active", "updated_at")
 	list_filter = ("is_active",)
 	search_fields = ("name", "subject_template", "body_template")
-
-# Register your models here.

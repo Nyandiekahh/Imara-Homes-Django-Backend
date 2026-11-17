@@ -8,6 +8,7 @@ class PaymentSerializer(serializers.ModelSerializer):
     tenant_name = serializers.CharField(source="tenancy.user.full_name", read_only=True)
     unit_name = serializers.CharField(source="unit.name", read_only=True)
     property_id = serializers.UUIDField(source="property.id", read_only=True)
+    property_name = serializers.CharField(source="property.name", read_only=True)
 
     class Meta:
         model = Payment
@@ -15,11 +16,13 @@ class PaymentSerializer(serializers.ModelSerializer):
             "id",
             "tenant_id",
             "property_id",
+            "property_name",
             "unit_name",
             "tenant_name",
             "period",
             "amount",
             "fine",
+            "charges",
             "total",
             "paid_amount",
             "status",

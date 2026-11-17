@@ -43,6 +43,9 @@ class Payment(TimeStampedModel):
 	mpesa_checkout_request_id = models.CharField(max_length=120, blank=True)
 	paid_at = models.DateTimeField(null=True, blank=True)
 	metadata = models.JSONField(default=dict, blank=True)
+	# Itemized non-rent charges captured from PaymentConfig at creation time
+	# (water/garbage/security/custom), e.g. [{"code": "water", "label": "Water", "amount": "500.00"}]
+	charges = models.JSONField(default=list, blank=True)
 
 	class Meta:
 		ordering = ["-created_at"]

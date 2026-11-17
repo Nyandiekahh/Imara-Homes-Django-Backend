@@ -1,6 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
+from django.conf import settings
 from django.db.models import Sum
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -8,20 +9,21 @@ from rest_framework.views import APIView
 
 from payments.models import Payment
 from tenancies.models import Tenancy
+from users.models import User
 
-from .models import PaymentConfig, Property, PropertyDocument, Unit
+from .models import PaymentConfig, Property, PropertyAgent, PropertyDocument, Unit
+from .scoping import accessible_properties, accessible_property_ids
 from .serializers import (
 	PaymentConfigSerializer,
+	PropertyAgentSerializer,
 	PropertyDocumentSerializer,
 	PropertySerializer,
 	UnitSerializer,
 )
 
 
-def _owner_property_or_404(user, property_id):
-	queryset = Property.objects.all()
-	if user.role == "owner":
-		queryset = queryset.filter(owner=user)
+def _owner_property_or_404(user, property_id, permission=None):
+	queryset = accessible_properties(user, permission=permission)
 	return queryset.filter(id=property_id).first()
 
 
@@ -29,9 +31,9 @@ class PropertyListCreateView(APIView):
 	permission_classes = [permissions.IsAuthenticated]
 
 	def get(self, request):
-		queryset = Property.objects.select_related("owner")
-		if request.user.role == "owner":
-			queryset = queryset.filter(owner=request.user)
+		queryset = Property.objects.select_related("owner").filter(
+			id__in=accessible_property_ids(request.user)
+		)
 		search = request.query_params.get("search")
 		if search:
 			queryset = queryset.filter(name__icontains=search)
@@ -39,6 +41,8 @@ class PropertyListCreateView(APIView):
 		return Response(serializer.data)
 
 	def post(self, request):
+		if request.user.role not in [User.Role.OWNER, User.Role.ADMIN]:
+			return Response({"detail": "Only owners can create properties."}, status=status.HTTP_403_FORBIDDEN)
 		serializer = PropertySerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
 		prop = serializer.save(owner=request.user)
@@ -50,10 +54,7 @@ class PropertyDetailView(APIView):
 	permission_classes = [permissions.IsAuthenticated]
 
 	def get_object(self, request, property_id):
-		prop = _owner_property_or_404(request.user, property_id)
-		if not prop:
-			return None
-		return prop
+		return _owner_property_or_404(request.user, property_id)
 
 	def get(self, request, property_id):
 		prop = self.get_object(request, property_id)
@@ -282,13 +283,149 @@ class OccupancyReportView(APIView):
 class PaymentConfigUpdateView(APIView):
 	permission_classes = [permissions.IsAuthenticated]
 
+	def get(self, request, property_id):
+		prop = _owner_property_or_404(request.user, property_id)
+		if not prop:
+			return Response({"detail": "Property not found."}, status=status.HTTP_404_NOT_FOUND)
+		config, _ = PaymentConfig.objects.get_or_create(property=prop)
+		return Response(PaymentConfigSerializer(config).data)
+
 	def patch(self, request, property_id):
 		prop = _owner_property_or_404(request.user, property_id)
 		if not prop:
 			return Response({"detail": "Property not found."}, status=status.HTTP_404_NOT_FOUND)
 
 		config, _ = PaymentConfig.objects.get_or_create(property=prop)
-		serializer = PaymentConfigSerializer(config, data=request.data, partial=True)
+
+		# Every numeric field here is a DecimalField, which rejects an empty
+		# string outright ("A valid number is required.") instead of treating it
+		# as "no value". The owner-facing forms (onboarding wizard, Edit Property)
+		# send "" when a charge field is left blank or cleared, so normalize that
+		# to 0 here too -- the one place both callers, and any future client,
+		# funnel through.
+		decimal_fields = [
+			"fine_amount", "fine_percentage", "fine_per_day",
+			"water_bill", "garbage_bill", "security_levy",
+			"expenditure_rate_percent", "rental_tax_rate_percent",
+		]
+		data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+		for field in decimal_fields:
+			if field in data and data[field] == "":
+				data[field] = 0
+
+		serializer = PaymentConfigSerializer(config, data=data, partial=True)
 		serializer.is_valid(raise_exception=True)
 		serializer.save()
 		return Response(serializer.data)
+
+
+class PropertyAgentListCreateView(APIView):
+	"""Owners assign caretakers/agents to a property by email. If no account
+	exists yet for that email, a tenant-less agent account is created and the
+	agent is invited (an OTP-backed activation, mirroring tenant invitations)."""
+
+	permission_classes = [permissions.IsAuthenticated]
+
+	def get(self, request, property_id):
+		prop = _owner_property_or_404(request.user, property_id)
+		if not prop:
+			return Response({"detail": "Property not found."}, status=status.HTTP_404_NOT_FOUND)
+		assignments = prop.agents.select_related("agent").filter(is_active=True)
+		return Response(PropertyAgentSerializer(assignments, many=True).data)
+
+	def post(self, request, property_id):
+		if request.user.role not in [User.Role.OWNER, User.Role.ADMIN]:
+			return Response({"detail": "Only owners can assign agents."}, status=status.HTTP_403_FORBIDDEN)
+
+		prop = _owner_property_or_404(request.user, property_id)
+		if not prop:
+			return Response({"detail": "Property not found."}, status=status.HTTP_404_NOT_FOUND)
+
+		email = (request.data.get("email") or "").strip().lower()
+		if not email:
+			return Response({"detail": "email is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+		agent_user, created = User.objects.get_or_create(
+			email=email,
+			defaults={
+				"full_name": request.data.get("full_name", "") or email.split("@")[0],
+				"phone": request.data.get("phone", ""),
+				"role": User.Role.AGENT,
+				"is_active": True,
+			},
+		)
+		if not created and agent_user.role not in [User.Role.AGENT, User.Role.ADMIN]:
+			return Response(
+				{"detail": "That email belongs to an existing owner/tenant account and cannot be reused as an agent."},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
+
+		assignment, _ = PropertyAgent.objects.update_or_create(
+			property=prop,
+			agent=agent_user,
+			defaults={
+				"assigned_by": request.user,
+				"can_manage_payments": bool(request.data.get("can_manage_payments", True)),
+				"can_manage_maintenance": bool(request.data.get("can_manage_maintenance", True)),
+				"can_manage_tenants": bool(request.data.get("can_manage_tenants", False)),
+				"can_send_communications": bool(request.data.get("can_send_communications", True)),
+				"is_active": True,
+			},
+		)
+
+		from users.models import OTPCode
+		from communications.notify import notify_user
+
+		if created:
+			otp = OTPCode.create_for_user(agent_user, OTPCode.Purpose.INVITATION)
+			activation_link = f"{settings.FRONTEND_BASE_URL}/verify-otp?email={agent_user.email}"
+			notify_user(
+				agent_user,
+				subject=f"You've been added as an agent for {prop.name}",
+				message=(
+					f"You have been added as a caretaker/agent for {prop.name}. "
+					f"Your activation code is {otp.code}. Activate your account here: {activation_link} "
+					f"(or open the app and enter this code with your email {agent_user.email})."
+				),
+			)
+
+		return Response(PropertyAgentSerializer(assignment).data, status=status.HTTP_201_CREATED)
+
+
+class PropertyAgentDetailView(APIView):
+	permission_classes = [permissions.IsAuthenticated]
+
+	def patch(self, request, property_id, agent_id):
+		prop = _owner_property_or_404(request.user, property_id)
+		if not prop:
+			return Response({"detail": "Property not found."}, status=status.HTTP_404_NOT_FOUND)
+		assignment = prop.agents.filter(id=agent_id).first()
+		if not assignment:
+			return Response({"detail": "Assignment not found."}, status=status.HTTP_404_NOT_FOUND)
+		serializer = PropertyAgentSerializer(assignment, data=request.data, partial=True)
+		serializer.is_valid(raise_exception=True)
+		serializer.save()
+		return Response(serializer.data)
+
+	def delete(self, request, property_id, agent_id):
+		prop = _owner_property_or_404(request.user, property_id)
+		if not prop:
+			return Response({"detail": "Property not found."}, status=status.HTTP_404_NOT_FOUND)
+		assignment = prop.agents.filter(id=agent_id).first()
+		if not assignment:
+			return Response({"detail": "Assignment not found."}, status=status.HTTP_404_NOT_FOUND)
+		assignment.is_active = False
+		assignment.save(update_fields=["is_active", "updated_at"])
+		return Response({"success": True})
+
+
+class MyAgentAssignmentsView(APIView):
+	"""For a logged-in agent: which properties they've been assigned to."""
+
+	permission_classes = [permissions.IsAuthenticated]
+
+	def get(self, request):
+		assignments = PropertyAgent.objects.select_related("property").filter(
+			agent=request.user, is_active=True
+		)
+		return Response(PropertyAgentSerializer(assignments, many=True).data)

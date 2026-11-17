@@ -2,7 +2,7 @@ from rest_framework import serializers
 
 from tenancies.models import Tenancy
 
-from .models import PaymentConfig, Property, PropertyDocument, Unit
+from .models import PaymentConfig, Property, PropertyAgent, PropertyDocument, Unit
 
 
 class PropertySerializer(serializers.ModelSerializer):
@@ -87,6 +87,8 @@ class PaymentConfigSerializer(serializers.ModelSerializer):
             "garbage_bill",
             "security_levy",
             "custom_charges",
+            "expenditure_rate_percent",
+            "rental_tax_rate_percent",
             "created_at",
             "updated_at",
         ]
@@ -118,3 +120,29 @@ class PropertyDocumentSerializer(serializers.ModelSerializer):
         if not obj.file:
             return ""
         return obj.file.name.split("/")[-1]
+
+
+class PropertyAgentSerializer(serializers.ModelSerializer):
+    property_id = serializers.UUIDField(source="property.id", read_only=True)
+    property_name = serializers.CharField(source="property.name", read_only=True)
+    agent_name = serializers.CharField(source="agent.full_name", read_only=True)
+    agent_email = serializers.CharField(source="agent.email", read_only=True)
+    agent_phone = serializers.CharField(source="agent.phone", read_only=True)
+
+    class Meta:
+        model = PropertyAgent
+        fields = [
+            "id",
+            "property_id",
+            "property_name",
+            "agent_name",
+            "agent_email",
+            "agent_phone",
+            "can_manage_payments",
+            "can_manage_maintenance",
+            "can_manage_tenants",
+            "can_send_communications",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]

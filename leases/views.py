@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from properties.models import Property, Unit
+from properties.scoping import accessible_property_ids
 from tenancies.models import Tenancy
 from users.models import User
 
@@ -15,8 +16,8 @@ from .serializers import LeaseSerializer
 
 def _lease_queryset_for_user(user):
 	qs = Lease.objects.select_related("tenancy", "property", "unit", "tenancy__user")
-	if user.role == User.Role.OWNER:
-		qs = qs.filter(property__owner=user)
+	if user.role in (User.Role.OWNER, User.Role.AGENT, User.Role.ADMIN):
+		qs = qs.filter(property_id__in=accessible_property_ids(user))
 	elif user.role == User.Role.TENANT:
 		qs = qs.filter(tenancy__user=user)
 	return qs
@@ -47,7 +48,7 @@ class LeaseListCreateView(APIView):
 		if not tenancy or not prop or not unit:
 			return Response({"detail": "Invalid tenant, property, or unit."}, status=status.HTTP_400_BAD_REQUEST)
 
-		if request.user.role == User.Role.OWNER and prop.owner_id != request.user.id:
+		if request.user.role in (User.Role.OWNER, User.Role.AGENT) and prop.id not in set(accessible_property_ids(request.user)):
 			return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
 
 		lease = Lease.objects.create(

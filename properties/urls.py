@@ -2,8 +2,11 @@ from django.urls import path
 
 from .views import (
     AvailableUnitListView,
+    MyAgentAssignmentsView,
     OccupancyReportView,
     PaymentConfigUpdateView,
+    PropertyAgentDetailView,
+    PropertyAgentListCreateView,
     PropertyDetailView,
     PropertyDocumentDetailView,
     PropertyDocumentListCreateView,
@@ -26,4 +29,7 @@ urlpatterns = [
     path("properties/<uuid:property_id>/stats/", PropertyStatsView.as_view()),
     path("properties/<uuid:property_id>/occupancy/", OccupancyReportView.as_view()),
     path("properties/<uuid:property_id>/payment-config/", PaymentConfigUpdateView.as_view()),
+    path("properties/<uuid:property_id>/agents/", PropertyAgentListCreateView.as_view()),
+    path("properties/<uuid:property_id>/agents/<uuid:agent_id>/", PropertyAgentDetailView.as_view()),
+    path("agents/me/assignments/", MyAgentAssignmentsView.as_view()),
 ]

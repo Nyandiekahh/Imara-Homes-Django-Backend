@@ -6,6 +6,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from communications.models import Notice
+from communications.notify import notify_user
+from django.conf import settings
+from properties.scoping import accessible_property_ids
 from leases.models import Lease
 from maintenance.models import MaintenanceRequest
 from payments.models import Payment
@@ -23,8 +26,8 @@ from .serializers import (
 
 def _owner_tenancies(user):
 	qs = Tenancy.objects.select_related("user", "property", "unit")
-	if user.role == User.Role.OWNER:
-		qs = qs.filter(property__owner=user)
+	if user.role in (User.Role.OWNER, User.Role.AGENT, User.Role.ADMIN):
+		qs = qs.filter(property_id__in=accessible_property_ids(user, permission="can_manage_tenants" if user.role == User.Role.AGENT else None))
 	elif user.role == User.Role.TENANT:
 		qs = qs.filter(user=user)
 	return qs
@@ -63,10 +66,10 @@ class TenantsInviteView(APIView):
 	permission_classes = [permissions.IsAuthenticated]
 
 	def post(self, request):
-		if request.user.role not in [User.Role.OWNER, User.Role.ADMIN]:
-			return Response({"detail": "Only owners can invite tenants."}, status=status.HTTP_403_FORBIDDEN)
+		if request.user.role not in [User.Role.OWNER, User.Role.ADMIN, User.Role.AGENT]:
+			return Response({"detail": "Only owners or agents can invite tenants."}, status=status.HTTP_403_FORBIDDEN)
 
-		email = request.data.get("email")
+		email = (request.data.get("email") or "").strip().lower()
 		property_id = request.data.get("property_id")
 		full_name = request.data.get("full_name", "")
 		phone = request.data.get("phone", "")
@@ -79,8 +82,13 @@ class TenantsInviteView(APIView):
 				status=status.HTTP_400_BAD_REQUEST,
 			)
 
-		prop = Property.objects.filter(id=property_id).first()
-		if not prop or (request.user.role == User.Role.OWNER and prop.owner_id != request.user.id):
+		# Agents must specifically hold can_manage_tenants on this property to invite
+		# a tenant to it -- being assigned to the property at all is not enough (an
+		# agent might only be permitted to handle maintenance or payments). Owners
+		# and admins are unrestricted, matching accessible_property_ids' own rule.
+		perm = "can_manage_tenants" if request.user.role == User.Role.AGENT else None
+		prop = Property.objects.filter(id=property_id, id__in=accessible_property_ids(request.user, permission=perm)).first()
+		if not prop:
 			return Response({"detail": "Property not found."}, status=status.HTTP_404_NOT_FOUND)
 
 		unit = None
@@ -109,12 +117,23 @@ class TenantsInviteView(APIView):
 			},
 		)
 		if not created:
+			# Guard against role-integrity loss: this email may belong to an
+			# existing Owner, Agent or Admin account. Silently overwriting their
+			# role to TENANT here would let anyone with tenant-invite access
+			# (owner, admin, or an agent) demote another account by "inviting"
+			# its email address as a tenant. Only allow reuse when the account
+			# is already a tenant (e.g. an existing tenant being added to a
+			# second unit/property).
+			if user.role != User.Role.TENANT:
+				return Response(
+					{"detail": "That email belongs to an existing account with a different role and cannot be reused as a tenant."},
+					status=status.HTTP_400_BAD_REQUEST,
+				)
 			if full_name:
 				user.full_name = full_name
 			if phone:
 				user.phone = phone
-			user.role = User.Role.TENANT
-			user.save(update_fields=["full_name", "phone", "role", "updated_at"])
+			user.save(update_fields=["full_name", "phone", "updated_at"])
 
 		tenancy, _ = Tenancy.objects.update_or_create(
 			user=user,
@@ -127,16 +146,23 @@ class TenantsInviteView(APIView):
 		)
 
 		otp = OTPCode.create_for_user(user, OTPCode.Purpose.INVITATION)
+		activation_link = f"{settings.FRONTEND_BASE_URL}/verify-otp?email={user.email}"
+		invite_message = (
+			f"You have been invited to join {prop.name}. Your activation code is {otp.code}. "
+			f"Activate your account here: {activation_link} (or open the app and enter this code with your email {user.email})."
+		)
 		Notice.objects.create(
 			tenant=user,
 			property=prop,
 			type="general",
-			subject="Invitation to NestFlow",
-			message=f"You have been invited to join {prop.name}. Use OTP {otp.code} to continue.",
+			subject=f"Invitation to {settings.APP_NAME}",
+			message=invite_message,
 		)
+		notify_user(user, subject=f"Invitation to {settings.APP_NAME}", message=invite_message, force=True)
 
 		payload = TenancySerializer(tenancy).data
-		payload["otp_debug"] = otp.code
+		if settings.DEBUG:
+			payload["otp_debug"] = otp.code
 		return Response(payload, status=status.HTTP_201_CREATED)
 
 
@@ -246,17 +272,17 @@ class TenantMaintenanceListCreateView(APIView):
 		if not tenancy:
 			return Response({"detail": "Tenant not found."}, status=status.HTTP_404_NOT_FOUND)
 		requests = tenancy.maintenance_requests.all()
-		return Response(MaintenanceRequestSerializer(requests, many=True).data)
+		return Response(MaintenanceRequestSerializer(requests, many=True, context={"request": request}).data)
 
 	def post(self, request, tenant_id):
 		tenancy = _resolve_tenancy(request.user, tenant_id)
 		if not tenancy:
 			return Response({"detail": "Tenant not found."}, status=status.HTTP_404_NOT_FOUND)
 
-		serializer = MaintenanceRequestSerializer(data=request.data)
+		serializer = MaintenanceRequestSerializer(data=request.data, context={"request": request})
 		serializer.is_valid(raise_exception=True)
 		maintenance = serializer.save(tenancy=tenancy, unit=tenancy.unit)
-		return Response(MaintenanceRequestSerializer(maintenance).data, status=status.HTTP_201_CREATED)
+		return Response(MaintenanceRequestSerializer(maintenance, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 
 class TenantMaintenanceDetailView(APIView):
@@ -271,7 +297,7 @@ class TenantMaintenanceDetailView(APIView):
 		if not maintenance:
 			return Response({"detail": "Request not found."}, status=status.HTTP_404_NOT_FOUND)
 
-		serializer = MaintenanceRequestSerializer(maintenance, data=request.data, partial=True)
+		serializer = MaintenanceRequestSerializer(maintenance, data=request.data, partial=True, context={"request": request})
 		serializer.is_valid(raise_exception=True)
 		serializer.save()
 		return Response(serializer.data)
@@ -309,7 +335,14 @@ def send_reminders(request):
 	tenancies = _owner_tenancies(request.user).filter(status=Tenancy.Status.ACTIVE)
 	if property_id:
 		tenancies = tenancies.filter(property_id=property_id)
-	sent_count = tenancies.count()
+	sent_count = 0
+	for tenancy in tenancies:
+		message = (
+			f"Hi {tenancy.user.full_name or ''}, this is a reminder that your rent for "
+			f"{tenancy.unit.name if tenancy.unit else tenancy.property.name} is due."
+		).strip()
+		notify_user(tenancy.user, subject="Rent Payment Reminder", message=message)
+		sent_count += 1
 	return Response({"sent_count": sent_count})
 
 
@@ -324,7 +357,15 @@ def send_overdue_reminders(request):
 		tenancy__in=tenancies,
 		status=Payment.Status.OVERDUE,
 	).values_list("tenancy_id", flat=True)
-	sent_count = tenancies.filter(id__in=overdue_tenancy_ids).distinct().count()
+	overdue_tenancies = tenancies.filter(id__in=overdue_tenancy_ids).distinct()
+	sent_count = 0
+	for tenancy in overdue_tenancies:
+		message = (
+			f"Hi {tenancy.user.full_name or ''}, your rent payment is overdue. "
+			"Please settle it as soon as possible to avoid further fines."
+		).strip()
+		notify_user(tenancy.user, subject="Urgent: Overdue Rent Notice", message=message)
+		sent_count += 1
 	return Response({"sent_count": sent_count})
 
 
